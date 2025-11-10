@@ -1,0 +1,236 @@
+from typing import Dict, List, Tuple, Callable, Optional, Any
+import copy
+
+Variable = str
+Value = Tuple[str, str]
+Domain = List[Value]
+Assignment = Dict[Variable, Value]
+Constraint = Callable[[Assignment, Variable, Value], bool]
+
+class CSP:
+    def __init__(self, variables: List[Variable], domains: Dict[Variable, Domain], constraints: Dict[Variable, List[Constraint]]):
+        self.variables = variables
+        self.domains = domains
+        self.constraints = constraints
+
+    def is_consistent(self, var: Variable, val: Value, assignment: Assignment) -> bool:
+        for constraint in self.constraints.get(var, []):
+            if not constraint(assignment, var, val):
+                return False
+        return True
+
+def ac3(csp: CSP, domains: Dict[Variable, Domain]) -> bool:
+    queue = [(xi, xj) for xi in csp.variables for xj in csp.variables if xi != xj]
+    while queue:
+        xi, xj = queue.pop(0)
+        if revise(csp, domains, xi, xj):
+            if not domains[xi]:
+                return False
+            for xk in csp.variables:
+                if xk != xi and xk != xj:
+                    queue.append((xk, xi))
+    return True
+
+def revise(csp: CSP, domains: Dict[Variable, Domain], xi: Variable, xj: Variable) -> bool:
+    revised = False
+    to_remove = []
+    for vi in domains[xi]:
+        satisfies_some = False
+        for vj in domains[xj]:
+            temp_assign = {xi: vi, xj: vj}
+            ok = True
+            for constr in csp.constraints.get(xi, []):
+                if not constr(temp_assign, xi, vi):
+                    ok = False
+                    break
+            if not ok:
+                continue
+            for constr in csp.constraints.get(xj, []):
+                if not constr(temp_assign, xj, vj):
+                    ok = False
+                    break
+            if ok:
+                satisfies_some = True
+                break
+        if not satisfies_some:
+            to_remove.append(vi)
+    if to_remove:
+        for v in to_remove:
+            domains[xi].remove(v)
+        revised = True
+    return revised
+
+def select_unassigned_variable(assignment: Assignment, csp: CSP, domains: Dict[Variable, Domain]) -> Variable:
+    unassigned = [v for v in csp.variables if v not in assignment]
+    mrv_count = min(len(domains[v]) for v in unassigned)
+    mrv_vars = [v for v in unassigned if len(domains[v]) == mrv_count]
+    if len(mrv_vars) == 1:
+        return mrv_vars[0]
+    def degree(v):
+        cnt = 0
+        for c in csp.constraints.get(v, []):
+            cnt += 1
+        return cnt
+    return max(mrv_vars, key=degree)
+
+def order_domain_values(var: Variable, assignment: Assignment, domains: Dict[Variable, Domain], csp: CSP) -> Domain:
+    neighbors = [v for v in csp.variables if v != var and v not in assignment]
+    def count_ruled_out(val):
+        total = 0
+        temp_assign = assignment.copy()
+        temp_assign[var] = val
+        for nb in neighbors:
+            for v in domains[nb]:
+                if not all(constr(temp_assign, nb, v) for constr in csp.constraints.get(nb, [])):
+                    total += 1
+        return total
+    return sorted(domains[var], key=count_ruled_out)
+
+def backtracking_search(csp: CSP, inference: Optional[Callable[[CSP, Dict[Variable, Domain]], Optional[bool]]] = None) -> Optional[Assignment]:
+    def backtrack(assignment: Assignment, domains: Dict[Variable, Domain]) -> Optional[Assignment]:
+        if len(assignment) == len(csp.variables):
+            return assignment
+        var = select_unassigned_variable(assignment, csp, domains)
+        for value in order_domain_values(var, assignment, domains, csp):
+            if csp.is_consistent(var, value, assignment):
+                assignment[var] = value
+                new_domains = copy.deepcopy(domains)
+                new_domains[var] = [value]
+                inference_ok = True
+                if inference is not None:
+                    inference_ok = inference(csp, new_domains) is not False
+                if inference_ok:
+                    result = backtrack(assignment, new_domains)
+                    if result is not None:
+                        return result
+                del assignment[var]
+        return None
+    initial_domains = copy.deepcopy(csp.domains)
+    if inference is not None:
+        inference(csp, initial_domains)
+    return backtrack({}, initial_domains)
+
+TIMESLOTS = ["Mon 9-10", "Mon 10-11", "Tue 9-10", "Tue 10-11", "Wed 9-10", "Wed 10-11"]
+ROOMS = {"R1": 40, "R2": 30, "R3": 20}
+COURSES = {
+    "Math": {"teacher": "T1", "students": {"S1","S2","S3","S4","S5","S6","S7","S8"}, "size": 8},
+    "Physics": {"teacher": "T2", "students": {"S1","S2","S3","S9","S10"}, "size": 5},
+    "Chemistry": {"teacher": "T3", "students": {"S4","S5","S6","S11"}, "size": 4},
+    "Biology": {"teacher": "T1", "students": {"S7","S8","S11","S12"}, "size": 4},
+    "English": {"teacher": "T4", "students": {"S1","S9","S12","S13"}, "size": 4},
+    "History": {"teacher": "T5", "students": {"S2","S3","S13","S14"}, "size": 4},
+}
+
+variables = list(COURSES.keys())
+domains: Dict[Variable, Domain] = {}
+for course, info in COURSES.items():
+    sz = info["size"]
+    domain = [(t, r) for t in TIMESLOTS for r, cap in ROOMS.items() if cap >= sz]
+    domains[course] = domain
+
+def teacher_constraint_factory(course_name: str) -> Constraint:
+    def constraint(assignment: Assignment, var: Variable, val: Value) -> bool:
+        teacher = COURSES[course_name]["teacher"]
+        t_val, _ = val
+        for other_course, assigned_val in assignment.items():
+            if other_course == course_name:
+                continue
+            if COURSES[other_course]["teacher"] == teacher and assigned_val[0] == t_val:
+                return False
+        return True
+    return constraint
+
+def room_constraint_factory(course_name: str) -> Constraint:
+    def constraint(assignment: Assignment, var: Variable, val: Value) -> bool:
+        t_val, r_val = val
+        for other_course, assigned_val in assignment.items():
+            if other_course == course_name:
+                continue
+            if assigned_val[0] == t_val and assigned_val[1] == r_val:
+                return False
+        return True
+    return constraint
+
+def student_conflict_constraint_factory(course_name: str) -> Constraint:
+    students = COURSES[course_name]["students"]
+    def constraint(assignment: Assignment, var: Variable, val: Value) -> bool:
+        t_val, _ = val
+        for other_course, assigned_val in assignment.items():
+            if other_course == course_name:
+                continue
+            if students & COURSES[other_course]["students"] and assigned_val[0] == t_val:
+                return False
+        return True
+    return constraint
+
+def capacity_constraint_factory(course_name: str) -> Constraint:
+    size = COURSES[course_name]["size"]
+    def constraint(assignment: Assignment, var: Variable, val: Value) -> bool:
+        _, room = val
+        return ROOMS[room] >= size
+    return constraint
+
+constraints: Dict[Variable, List[Constraint]] = {}
+for course in variables:
+    constraints[course] = [
+        teacher_constraint_factory(course),
+        room_constraint_factory(course),
+        student_conflict_constraint_factory(course),
+        capacity_constraint_factory(course),
+    ]
+
+timetable_csp = CSP(variables, domains, constraints)
+
+def inference_forward_checking(csp: CSP, domains: Dict[Variable, Domain]) -> bool:
+    changed = True
+    while changed:
+        changed = False
+        assigned = [v for v, d in domains.items() if len(d) == 1]
+        for var in assigned:
+            val = domains[var][0]
+            for other in csp.variables:
+                if other == var:
+                    continue
+                removed = []
+                for v in domains[other]:
+                    temp_assign = {var: val, other: v}
+                    ok_other = all(constr(temp_assign, other, v) for constr in csp.constraints.get(other, []))
+                    ok_var = all(constr(temp_assign, var, val) for constr in csp.constraints.get(var, []))
+                    if not (ok_other and ok_var):
+                        removed.append(v)
+                if removed:
+                    for r in removed:
+                        domains[other].remove(r)
+                    changed = True
+                    if not domains[other]:
+                        return False
+    return True
+
+def inference_ac3_wrapper(csp: CSP, domains: Dict[Variable, Domain]) -> bool:
+    return ac3(csp, domains)
+
+def pretty_print_solution(sol: Assignment):
+    if sol is None:
+        print("No solution found.")
+        return
+    print("Solution:")
+    items = list(sol.items())
+    items.sort(key=lambda x: (x[1][0], x[1][1], x[0]))
+    for course, (timeslot, room) in items:
+        info = COURSES[course]
+        print(f"  {course:10} | {timeslot:8} | {room:2} | Teacher: {info['teacher']} | Students: {info['size']}")
+
+def main():
+    print("Timetable CSP demo:")
+    print("Solving with backtracking + MRV + forward checking ...")
+    sol1 = backtracking_search(timetable_csp, inference_forward_checking)
+    pretty_print_solution(sol1)
+    print("\nSolving with backtracking + MRV + AC-3 ...")
+    sol2 = backtracking_search(timetable_csp, inference_ac3_wrapper)
+    pretty_print_solution(sol2)
+    print("\nSolving with backtracking (no inference) ...")
+    sol3 = backtracking_search(timetable_csp, None)
+    pretty_print_solution(sol3)
+
+if __name__ == "__main__":
+    main()
